@@ -120,3 +120,29 @@ configure_file("compiler/sym++.in" "sym++" @ONLY)
 # add_subdirectory(test)
 # but since the tests define the "check" target, we need to redefine that one manually...
 add_custom_target(check DEPENDS SymRuntime Symbolize)
+
+
+# custom libcxx
+include(ExternalProject)
+ExternalProject_Add(libcxx_symcc
+        SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/llvm
+        CMAKE_COMMAND SYMCC_REGULAR_LIBCXX=yes SYMCC_NO_SYMBOLIC_INPUT=yes cmake
+        CMAKE_ARGS "-DCMAKE_C_COMPILER=${CMAKE_CURRENT_BINARY_DIR}/symcc"
+        "-DCMAKE_CXX_COMPILER=${CMAKE_CURRENT_BINARY_DIR}/sym++"
+        "-DLLVM_ENABLE_PROJECTS='libcxx$<SEMICOLON>libcxxabi'"
+        "-DLLVM_TARGETS_TO_BUILD='X86'"
+        "-DLLVM_DISTRIBUTION_COMPONENTS='cxx$<SEMICOLON>cxxabi$<SEMICOLON>cxx-headers'"
+        "-DLLVM_INCLUDE_TESTS=OFF"
+        "-DLLVM_INCLUDE_EXAMPLES=OFF"
+        "-DLLVM_INCLUDE_BENCHMARKS=OFF"
+        "-DLLVM_INCLUDE_TOOLS=OFF"
+        "-DLLVM_BUILD_TOOLS=OFF"
+        "-DCMAKE_BUILD_TYPE=Release"
+        CMAKE_GENERATOR Ninja
+        SOURCE_SUBDIR llvm
+        BUILD_COMMAND SYMCC_REGULAR_LIBCXX=yes SYMCC_NO_SYMBOLIC_INPUT=yes ninja distribution
+        #prevent default install action
+        INSTALL_COMMAND cp -r "./include" "${SYM_RUNTIME_DIR}"
+        COMMAND cp ./lib/libc++.a "${SYM_RUNTIME_DIR}/libcxx_symcc"
+        COMMAND cp ./lib/libc++abi.a "${SYM_RUNTIME_DIR}/libcxx_symcc"
+        DEPENDS SymRuntime Symbolize)
