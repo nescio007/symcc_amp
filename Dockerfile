@@ -35,11 +35,6 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 RUN pip3 install lit
 
-# Build AFL.
-RUN git clone -b v2.56b https://github.com/google/AFL.git afl \
-    && cd afl \
-    && make
-
 # Download the LLVM sources already so that we don't need to get them again when
 # SymCC changes
 RUN git clone -b llvmorg-10.0.1 --depth 1 https://github.com/llvm/llvm-project.git /llvm_source
@@ -110,12 +105,9 @@ COPY --from=builder /symcc_build /symcc_build
 COPY --from=builder /root/.cargo/bin/symcc_fuzzing_helper /symcc_build/
 COPY util/pure_concolic_execution.sh /symcc_build/
 COPY --from=builder /libcxx_symcc_install /libcxx_symcc_install
-COPY --from=builder /afl /afl
+
 
 ENV PATH /symcc_build:$PATH
-ENV AFL_PATH /afl
-ENV AFL_CC clang-10
-ENV AFL_CXX clang++-10
 ENV SYMCC_LIBCXX_PATH=/libcxx_symcc_install
 
 USER ubuntu
