@@ -14,8 +14,8 @@
 
 cmake_minimum_required(VERSION 3.5)
 project(SymbolicCompiler)
+set(CMAKE_FIND_PACKAGE_RESOLVE_SYMLINKS TRUE)
 
-option(QSYM_BACKEND "Use the Qsym backend instead of our own" OFF)
 option(TARGET_32BIT "Make the compiler work correctly with -m32" OFF)
 
 # We need to build the runtime as an external project because CMake otherwise
@@ -24,17 +24,25 @@ option(TARGET_32BIT "Make the compiler work correctly with -m32" OFF)
 include(ExternalProject)
 
 set(SYM_RUNTIME_BUILD_ARGS
+  -DCMAKE_AR=${CMAKE_AR}
   -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
   -DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}
+  -DCMAKE_C_FLAGS_INIT=${CMAKE_C_FLAGS_INIT}
   -DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}
   -DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS}
+  -DCMAKE_CXX_FLAGS_INIT=${CMAKE_CXX_FLAGS_INIT}
+  -DCMAKE_EXE_LINKER_FLAGS=${CMAKE_EXE_LINKER_FLAGS}
+  -DCMAKE_EXE_LINKER_FLAGS_INIT=${CMAKE_EXE_LINKER_FLAGS_INIT}
+  -DCMAKE_MODULE_LINKER_FLAGS=${CMAKE_MODULE_LINKER_FLAGS}
+  -DCMAKE_MODULE_LINKER_FLAGS_INIT=${CMAKE_MODULE_LINKER_FLAGS_INIT}
   -DCMAKE_SHARED_LINKER_FLAGS=${CMAKE_SHARED_LINKER_FLAGS}
-  -DQSYM_BACKEND=${QSYM_BACKEND}
+  -DCMAKE_SHARED_LINKER_FLAGS_INIT=${CMAKE_SHARED_LINKER_FLAGS_INIT}
+  -DCMAKE_SYSROOT=${CMAKE_SYSROOT}
   -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
   -DZ3_TRUST_SYSTEM_VERSION=${Z3_TRUST_SYSTEM_VERSION})
 
 ExternalProject_Add(SymRuntime
-  SOURCE_DIR ${CMAKE_SOURCE_DIR}/runtime
+  SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/runtime
   CMAKE_ARGS
   ${SYM_RUNTIME_BUILD_ARGS}
   -DCMAKE_EXPORT_COMPILE_COMMANDS=${CMAKE_EXPORT_COMPILE_COMMANDS}
@@ -48,11 +56,11 @@ set(SYM_RUNTIME_DIR ${BINARY_DIR})
 
 if (${TARGET_32BIT})
   ExternalProject_Add(SymRuntime32
-    SOURCE_DIR ${CMAKE_SOURCE_DIR}/runtime
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/runtime
     CMAKE_ARGS
     ${SYM_RUNTIME_BUILD_ARGS}
-    -DCMAKE_C_FLAGS="-m32"
-    -DCMAKE_CXX_FLAGS="-m32"
+    -DCMAKE_C_FLAGS="${CMAKE_C_FLAGS} -m32"
+    -DCMAKE_CXX_FLAGS="${CMAKE_CXX_FLAGS} -m32"
     -DZ3_DIR=${Z3_32BIT_DIR}
     -DLLVM_DIR=${LLVM_32BIT_DIR}
     INSTALL_COMMAND ""
@@ -108,4 +116,7 @@ endif()
 configure_file("compiler/symcc.in" "symcc" @ONLY)
 configure_file("compiler/sym++.in" "sym++" @ONLY)
 
-add_subdirectory(test)
+# We removed a lot of functionality, so we just disable the tests
+# add_subdirectory(test)
+# but since the tests define the "check" target, we need to redefine that one manually...
+add_custom_target(check DEPENDS SymRuntime Symbolize)

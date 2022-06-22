@@ -115,10 +115,7 @@ void _sym_initialize(void) {
 
   loadConfig();
   initLibcWrappers();
-  std::cerr << "This is SymCC running with the simple backend" << std::endl
-            << "For anything but debugging SymCC itself, you will want to use "
-               "the QSYM backend instead (see README.md for build instructions)"
-            << std::endl;
+  std::cerr << "This is SymCC running with the simple backend" << std::endl;
 
   Z3_config cfg;
 
