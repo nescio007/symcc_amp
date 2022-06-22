@@ -115,6 +115,7 @@ endif()
 
 configure_file("compiler/symcc.in" "symcc" @ONLY)
 configure_file("compiler/sym++.in" "sym++" @ONLY)
+file(COPY "make_sym" DESTINATION "./" USE_SOURCE_PERMISSIONS)
 
 # We removed a lot of functionality, so we just disable the tests
 # add_subdirectory(test)

@@ -1,0 +1,123 @@
+#!/bin/bash
+set -eux
+
+SYMCC_BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+SYMCC_RUNTIME_DIR="$(readlink -f "${SYMCC_BASE}/SymRuntime-prefix/src/SymRuntime-build")"
+SYMCC_LIBCXX_DIR="$(readlink -f "${SYMCC_BASE}/libcxx_symcc-prefix/src/libcxx_symcc-build/lib")"
+
+LIBMODE=false
+
+while [ $# -gt 1 ]; do
+  case $1 in
+  -l | --lib)
+    LIBMODE=true
+    ;;
+  *)
+    echo "Unknown argument $1, ignoring"
+    ;;
+  esac
+  shift 1
+done
+
+input_file=$1
+bitcode="${input_file}.bc"
+bitcode_sym="${input_file}.sym.bc"
+
+output_sym="${input_file}.sym"
+
+
+if ! [ -f "${bitcode}" ]; then
+  extract-bc -o "${bitcode}" "${input_file}"
+  if ! [ -f "${bitcode}" ]; then
+    echo >&2 "Cannot extract bitcode from ${input_file}"
+    exit 1
+  fi
+fi
+
+# ================
+# Generate abilists
+# ================
+
+extra_runtime=""
+extra_link=""
+extra_link_sym=""
+
+for lib in $(ldd ${input_file} | sed -n -E 's/^.*=>\s*(\S+)\s.*$/\1/;T;p'); do
+  libname=$(basename "${lib}")
+  echo "Checking dependency ${libname} (${lib})"
+  if ([ -f "${lib}.sym" ] ) || ${SYMCC_BASE}/make_sym -l "${lib}"; then
+    extra_link_sym="${extra_link_sym} -l:${libname}.sym"
+  else
+    extra_link="${extra_link} -l:${libname}"
+  fi
+done
+
+
+# ================
+# Instrumentation
+# ================
+base_id=$(md5sum "${bitcode}" | sed -n 's/^\([0-9a-fA-F]\{16\}\).*$/0x\1/;T;p')
+
+opt -load=${SYMCC_BASE}/libSymbolize.so \
+  -symbolize \
+  -o "${bitcode_sym}" "${bitcode}"
+
+
+# ================
+# Compilation/Linking
+# ================
+
+compiler=$(which clang)
+# Step1: find link-paths from original
+extra_linkpath=$(readelf -d "${input_file}" | sed -n 's/^.*(\(RUNPATH\|RPATH\)).*\[\(.*\)]$/\2/g;T;p' | sed 's/:/\n/g' | sed 's/^/-L/g' | xargs)
+extra_rpath=$(readelf -d "${input_file}" | sed -n 's/^.*(\(RUNPATH\|RPATH\)).*\[\(.*\)]$/\2/g;T;p' | sed 's/:/\n/g' | sed 's/^/-Wl,-rpath=/g' | xargs)
+
+# Step2: Adjust extra_link and set compiler
+if [[ "${extra_link}" == *"c++"* ]]; then
+  extra_link="-L\"${SYMCC_LIBCXX_DIR}\" -Wl,-rpath,\"${SYMCC_LIBCXX_DIR}\" -stdlib=libc++ -Wl,--start-group -lstdc++ -lc++ -lc++abi -Wl,--end-group ${extra_link}"
+  compiler=$(which clang++)
+else
+  extra_link="${extra_link}"
+fi
+
+extra_link="${extra_linkpath} ${extra_link} ${extra_rpath}"
+
+if [ ${LIBMODE} = false ]; then
+
+  ${compiler} -o "${output_sym}" "${bitcode_sym}" \
+    -pie \
+    -fpic \
+    -Qunused-arguments \
+    -g \
+    -O3 \
+    -L"${SYMCC_RUNTIME_DIR}" \
+    -lSymRuntime \
+    -Wl,-rpath,"${SYMCC_RUNTIME_DIR}" \
+    -ldl \
+    -lrt \
+    -lpthread \
+    -lm \
+    ${extra_link} \
+    ${extra_link_sym} \
+    -Wl,-export-dynamic
+
+  
+else
+  ${compiler} -o "${output_sym}" "${bitcode_sym}" \
+    -shared \
+    -fpic \
+    -Qunused-arguments \
+    -g \
+    -O3 \
+    -L"${SYMCC_RUNTIME_DIR}" \
+    -lSymRuntime \
+    -Wl,-rpath,"${SYMCC_RUNTIME_DIR}" \
+    -ldl \
+    -lrt \
+    -lpthread \
+    -lm \
+    ${extra_link} \
+    ${extra_link_sym} \
+    -Wl,-export-dynamic
+
+  fi
