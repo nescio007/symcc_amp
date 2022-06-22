@@ -18,9 +18,14 @@
 #include <cassert>
 #include <numeric>
 
+
+#include "GarbageCollection.h"
 #include "RuntimeCommon.h"
 #include "Shadow.h"
-#include "GarbageCollection.h"
+
+#include <mutex>
+/// The global mutex for concurrent access
+std::recursive_mutex g_mutex;
 
 namespace {
 
@@ -79,7 +84,7 @@ void _sym_memmove(uint8_t *dest, const uint8_t *src, size_t length) {
     std::copy(srcShadow.begin(), srcShadow.end(), destShadow.begin());
 }
 
-SymExpr _sym_read_memory(uint8_t *addr, size_t length, bool little_endian) {
+SymExpr _sym_read_memory(const uint8_t *addr, size_t length, bool little_endian, bool forceSymbolic) {
   assert(length && "Invalid query for zero-length memory region");
 
 #ifdef DEBUG_RUNTIME
@@ -90,8 +95,10 @@ SymExpr _sym_read_memory(uint8_t *addr, size_t length, bool little_endian) {
 
   // If the entire memory region is concrete, don't create a symbolic expression
   // at all.
-  if (isConcrete(addr, length))
+  if (!forceSymbolic && isConcrete(addr, length))
     return nullptr;
+
+  LOCK;
 
   ReadOnlyShadow shadow(addr, length);
   return std::accumulate(shadow.begin_non_null(), shadow.end_non_null(),
@@ -119,6 +126,8 @@ void _sym_write_memory(uint8_t *addr, size_t length, SymExpr expr,
   if (expr == nullptr && isConcrete(addr, length))
     return;
 
+  LOCK;
+
   ReadWriteShadow shadow(addr, length);
   if (expr == nullptr) {
     std::fill(shadow.begin(), shadow.end(), nullptr);
@@ -136,6 +145,7 @@ void _sym_write_memory(uint8_t *addr, size_t length, SymExpr expr,
 
 SymExpr _sym_build_extract(SymExpr expr, uint64_t offset, uint64_t length,
                            bool little_endian) {
+  LOCK;
   size_t totalBits = _sym_bits_helper(expr);
   assert((totalBits % 8 == 0) && "Aggregate type contains partial bytes");
 
@@ -158,9 +168,45 @@ SymExpr _sym_build_extract(SymExpr expr, uint64_t offset, uint64_t length,
 }
 
 SymExpr _sym_build_bswap(SymExpr expr) {
+  LOCK;
   size_t bits = _sym_bits_helper(expr);
   assert((bits % 16 == 0) && "bswap is not applicable");
   return _sym_build_extract(expr, 0, bits / 8, true);
+}
+
+SymExpr _sym_build_insert(SymExpr target, SymExpr to_insert, uint64_t offset,
+                          bool little_endian) {
+  LOCK;
+  size_t bitsToInsert = _sym_bits_helper(to_insert);
+  assert((bitsToInsert % 8 == 0) &&
+         "Expression to insert contains partial bytes");
+
+  SymExpr beforeInsert =
+      (offset == 0) ? nullptr : _sym_build_extract(target, 0, offset, false);
+  SymExpr newPiece = little_endian ? _sym_build_bswap(to_insert) : to_insert;
+  uint64_t afterLen =
+      (_sym_bits_helper(target) / 8) - offset - (bitsToInsert / 8);
+  SymExpr afterInsert =
+      (afterLen == 0) ? nullptr
+                      : _sym_build_extract(target, offset + (bitsToInsert / 8),
+                                           afterLen, false);
+
+  SymExpr result = beforeInsert;
+  if (result == nullptr) {
+    result = newPiece;
+  } else {
+    result = _sym_concat_helper(result, newPiece);
+  }
+
+  if (afterInsert != nullptr) {
+    result = _sym_concat_helper(result, afterInsert);
+  }
+
+  return result;
+}
+
+SymExpr _sym_build_concat(SymExpr a, SymExpr b) {
+  return _sym_concat_helper(a, b);
 }
 
 void _sym_register_expression_region(SymExpr *start, size_t length) {

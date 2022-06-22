@@ -17,6 +17,7 @@
 
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/Intrinsics.h>
 
 #if LLVM_VERSION_MAJOR >= 9 && LLVM_VERSION_MAJOR < 11
   using SymFnT = llvm::Value *;
@@ -50,6 +51,7 @@ struct Runtime {
   SymFnT buildBoolOr{};
   SymFnT buildBoolXor{};
   SymFnT buildBoolToBits{};
+  SymFnT buildBitsToBool{};
   SymFnT pushPathConstraint{};
   SymFnT getParameterExpression{};
   SymFnT setParameterExpression{};
@@ -60,10 +62,13 @@ struct Runtime {
   SymFnT memmove{};
   SymFnT readMemory{};
   SymFnT writeMemory{};
+  SymFnT buildInsert{};
   SymFnT buildExtract{};
+  SymFnT buildConcat{};
   SymFnT notifyCall{};
   SymFnT notifyRet{};
   SymFnT notifyBasicBlock{};
+  SymFnT ensureBits{};
 
   /// Mapping from icmp predicates to the functions that build the corresponding
   /// symbolic expressions.
@@ -74,6 +79,7 @@ struct Runtime {
   /// corresponding symbolic expressions.
   std::array<SymFnT, llvm::Instruction::BinaryOpsEnd>
       binaryOperatorHandlers{};
+
 };
 
 bool isInterceptedFunction(const llvm::Function &f);

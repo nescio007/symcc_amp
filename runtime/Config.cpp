@@ -49,9 +49,9 @@ void loadConfig() {
   if (outputDir != nullptr)
     g_config.outputDir = outputDir;
 
-  auto *inputFile = getenv("SYMCC_INPUT_FILE");
-  if (inputFile != nullptr)
-    g_config.inputFile = inputFile;
+  auto *inputPort = getenv("SYMCC_INPUT_PORT");
+  if (inputPort != nullptr)
+    g_config.inputPort = static_cast<uint16_t>(atoi(inputPort));
 
   auto *logFile = getenv("SYMCC_LOG_FILE");
   if (logFile != nullptr)

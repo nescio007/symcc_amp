@@ -20,6 +20,7 @@
 #include <llvm/IR/InstVisitor.h>
 #include <llvm/IR/ValueMap.h>
 #include <llvm/Support/raw_ostream.h>
+#include <optional>
 
 #include "Runtime.h"
 
@@ -94,7 +95,7 @@ public:
   /// operations without symbolic data.
   void shortCircuitExpressionUses();
 
-  void handleIntrinsicCall(llvm::CallBase &I);
+  void handleIntrinsicCall(llvm::IntrinsicInst &I);
   void handleInlineAssembly(llvm::CallInst &I);
   void handleFunctionCall(llvm::CallBase &I, llvm::Instruction *returnPoint);
 
@@ -125,6 +126,7 @@ public:
   void visitFPToUI(llvm::FPToUIInst &I);
   void visitCastInst(llvm::CastInst &I);
   void visitPHINode(llvm::PHINode &I);
+  void visitInsertValueInst(llvm::InsertValueInst &I);
   void visitExtractValueInst(llvm::ExtractValueInst &I);
   void visitSwitchInst(llvm::SwitchInst &I);
   void visitUnreachableInst(llvm::UnreachableInst &);
@@ -214,7 +216,8 @@ private:
   /// Like buildRuntimeCall, but the call is always generated.
   SymbolicComputation
   forceBuildRuntimeCall(llvm::IRBuilder<> &IRB, SymFnT function,
-                        llvm::ArrayRef<std::pair<llvm::Value *, bool>> args);
+                        llvm::ArrayRef<std::pair<llvm::Value *, bool>> args,
+                        bool splitVectorArgs=true);
 
   /// Create a call to the specified function in the run-time library.
   ///
@@ -227,7 +230,8 @@ private:
   /// instruction is emitted and the function returns null.
   std::optional<SymbolicComputation>
   buildRuntimeCall(llvm::IRBuilder<> &IRB, SymFnT function,
-                   llvm::ArrayRef<std::pair<llvm::Value *, bool>> args) {
+                   llvm::ArrayRef<std::pair<llvm::Value *, bool>> args,
+                   bool splitVectorArgs=true) {
     if (std::all_of(args.begin(), args.end(),
                     [this](std::pair<llvm::Value *, bool> arg) {
                       return (getSymbolicExpression(arg.first) == nullptr);
@@ -235,19 +239,20 @@ private:
       return {};
     }
 
-    return forceBuildRuntimeCall(IRB, function, args);
+    return forceBuildRuntimeCall(IRB, function, args, splitVectorArgs);
   }
 
   /// Convenience overload that treats all arguments as symbolic.
   std::optional<SymbolicComputation>
   buildRuntimeCall(llvm::IRBuilder<> &IRB, SymFnT function,
-                   llvm::ArrayRef<llvm::Value *> symbolicArgs) {
+                   llvm::ArrayRef<llvm::Value *> symbolicArgs,
+                   bool splitVectorArgs=true) {
     std::vector<std::pair<llvm::Value *, bool>> args;
     for (const auto &arg : symbolicArgs) {
       args.emplace_back(arg, true);
     }
 
-    return buildRuntimeCall(IRB, function, args);
+    return buildRuntimeCall(IRB, function, args, splitVectorArgs);
   }
 
   /// Register the result of the computation as the symbolic expression
@@ -291,6 +296,10 @@ private:
     return llvm::ConstantInt::get(intPtrType,
                                   reinterpret_cast<uint64_t>(pointer));
   }
+
+  /// Compute the offset of a member in a (possibly nested) aggregate.
+  uint64_t aggregateMemberOffset(llvm::Type *aggregateType,
+                                 llvm::ArrayRef<unsigned> indices) const;
 
   const Runtime runtime;
 

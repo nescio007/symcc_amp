@@ -90,14 +90,17 @@ void Symbolizer::shortCircuitExpressionUses() {
     // Build the check whether any input expression is non-null (i.e., there
     // is a symbolic input).
     auto *nullExpression = ConstantPointerNull::get(IRB.getInt8PtrTy());
-    std::vector<Value *> nullChecks;
+    std::map<Value *, Value *> nullChecks;
     for (const auto &input : symbolicComputation.inputs) {
-      nullChecks.push_back(
-          IRB.CreateICmpEQ(nullExpression, input.getSymbolicOperand()));
+      Value *symbolicInput = input.getSymbolicOperand();
+      if (nullChecks.find(input.concreteValue) == nullChecks.end()) {
+        nullChecks[input.concreteValue] = IRB.CreateICmpEQ(nullExpression, symbolicInput);
+      }
     }
-    auto *allConcrete = nullChecks[0];
-    for (unsigned argIndex = 1; argIndex < nullChecks.size(); argIndex++) {
-      allConcrete = IRB.CreateAnd(allConcrete, nullChecks[argIndex]);
+    auto nullCheckIt = nullChecks.begin();
+    auto *allConcrete = nullCheckIt->second;
+    for (nullCheckIt++; nullCheckIt != nullChecks.end(); nullCheckIt++) {
+      allConcrete = IRB.CreateAnd(allConcrete, nullCheckIt->second);
     }
 
     // The main branch: if we don't enter here, we can short-circuit the
@@ -118,11 +121,19 @@ void Symbolizer::shortCircuitExpressionUses() {
         [&](const Input &input) {
           return (input.getSymbolicOperand() != nullExpression);
         });
+
+    std::map<Value *, Value *> replacementValues;
+
     for (unsigned argIndex = 0; argIndex < symbolicComputation.inputs.size();
          argIndex++) {
       auto &argument = symbolicComputation.inputs[argIndex];
       auto *originalArgExpression = argument.getSymbolicOperand();
       auto *argCheckBlock = symbolicComputation.firstInstruction->getParent();
+
+      if (replacementValues.find(argument.concreteValue) != replacementValues.end()) {
+        argument.replaceOperand(replacementValues[argument.concreteValue]);
+        continue;
+      }
 
       // We only need a run-time check for concreteness if the argument isn't
       // known to be concrete at compile time already. However, there is one
@@ -136,7 +147,7 @@ void Symbolizer::shortCircuitExpressionUses() {
 
       if (needRuntimeCheck) {
         auto *argExpressionBlock = SplitBlockAndInsertIfThen(
-            nullChecks[argIndex], symbolicComputation.firstInstruction,
+            nullChecks[argument.concreteValue], symbolicComputation.firstInstruction,
             /* unreachable */ false);
         IRB.SetInsertPoint(argExpressionBlock);
       } else {
@@ -158,6 +169,7 @@ void Symbolizer::shortCircuitExpressionUses() {
       }
 
       argument.replaceOperand(finalArgExpression);
+      replacementValues[argument.concreteValue] = finalArgExpression;
     }
 
     // Finally, the overall result (if the computation produces one) is null
@@ -176,10 +188,9 @@ void Symbolizer::shortCircuitExpressionUses() {
   }
 }
 
-void Symbolizer::handleIntrinsicCall(CallBase &I) {
-  auto *callee = I.getCalledFunction();
+void Symbolizer::handleIntrinsicCall(IntrinsicInst &I) {
 
-  switch (callee->getIntrinsicID()) {
+  switch (I.getIntrinsicID()) {
   case Intrinsic::lifetime_start:
   case Intrinsic::lifetime_end:
   case Intrinsic::dbg_declare:
@@ -285,7 +296,7 @@ void Symbolizer::handleIntrinsicCall(CallBase &I) {
     break;
   }
   default:
-    errs() << "Warning: unhandled LLVM intrinsic " << callee->getName()
+    errs() << "Warning: unhandled LLVM intrinsic " << I
            << "; the result will be concretized\n";
     break;
   }
@@ -304,7 +315,7 @@ void Symbolizer::handleInlineAssembly(CallInst &I) {
 void Symbolizer::handleFunctionCall(CallBase &I, Instruction *returnPoint) {
   auto *callee = I.getCalledFunction();
   if (callee != nullptr && callee->isIntrinsic()) {
-    handleIntrinsicCall(I);
+    handleIntrinsicCall(cast<IntrinsicInst>(I));
     return;
   }
 
@@ -374,12 +385,15 @@ void Symbolizer::visitSelectInst(SelectInst &I) {
   // negated) condition to the path constraints and copy the symbolic
   // expression over from the chosen argument.
 
+  auto cond = I.getCondition();
+
   IRBuilder<> IRB(&I);
   auto runtimeCall = buildRuntimeCall(IRB, runtime.pushPathConstraint,
-                                      {{I.getCondition(), true},
-                                       {I.getCondition(), false},
+                                      {{cond,                      true},
+                                       {cond,                      false},
                                        {getTargetPreferredInt(&I), false}});
   registerSymbolicComputation(runtimeCall);
+
 }
 
 void Symbolizer::visitCmpInst(CmpInst &I) {
@@ -465,13 +479,16 @@ void Symbolizer::visitLoadInst(LoadInst &I) {
       runtime.readMemory,
       {IRB.CreatePtrToInt(addr, intPtrType),
        ConstantInt::get(intPtrType, dataLayout.getTypeStoreSize(dataType)),
-       ConstantInt::get(IRB.getInt8Ty(), isLittleEndian(dataType) ? 1 : 0)});
+       IRB.getInt8(isLittleEndian(dataType) ? 1 : 0),
+       IRB.getInt8(0)});
 
   if (dataType->isFloatingPointTy()) {
     data = IRB.CreateCall(runtime.buildBitsToFloat,
                           {data, IRB.getInt1(dataType->isDoubleTy())});
+  } else if (dataType->isIntegerTy() && dataType->getPrimitiveSizeInBits() == 1){
+    data = IRB.CreateCall(runtime.buildBitsToBool,
+                          {data});
   }
-
   symbolicExpressions[&I] = data;
 }
 
@@ -749,30 +766,27 @@ void Symbolizer::visitPHINode(PHINode &I) {
   symbolicExpressions[&I] = exprPHI;
 }
 
+void Symbolizer::visitInsertValueInst(InsertValueInst &I) {
+  IRBuilder<> IRB(&I);
+  auto insert = buildRuntimeCall(
+      IRB, runtime.buildInsert,
+      {{I.getAggregateOperand(), true},
+       {I.getInsertedValueOperand(), true},
+       {IRB.getInt64(aggregateMemberOffset(I.getAggregateOperand()->getType(),
+                                           I.getIndices())),
+        false},
+       {IRB.getInt8(isLittleEndian(I.getInsertedValueOperand()->getType()) ? 1 : 0), false}});
+  registerSymbolicComputation(insert, &I);
+}
+
 void Symbolizer::visitExtractValueInst(ExtractValueInst &I) {
-  uint64_t offset = 0;
-  auto *indexedType = I.getAggregateOperand()->getType();
-  for (auto index : I.indices()) {
-    // All indices in an extractvalue instruction are constant:
-    // https://llvm.org/docs/LangRef.html#extractvalue-instruction
-
-    if (auto *structType = dyn_cast<StructType>(indexedType)) {
-      offset += dataLayout.getStructLayout(structType)->getElementOffset(index);
-      indexedType = structType->getElementType(index);
-    } else {
-      auto *arrayType = cast<ArrayType>(indexedType);
-      unsigned elementSize =
-          dataLayout.getTypeAllocSize(arrayType->getArrayElementType());
-      offset += elementSize * index;
-      indexedType = arrayType->getArrayElementType();
-    }
-  }
-
   IRBuilder<> IRB(&I);
   auto extract = buildRuntimeCall(
       IRB, runtime.buildExtract,
       {{I.getAggregateOperand(), true},
-       {IRB.getInt64(offset), false},
+       {IRB.getInt64(aggregateMemberOffset(I.getAggregateOperand()->getType(),
+                                           I.getIndices())),
+        false},
        {IRB.getInt64(dataLayout.getTypeStoreSize(I.getType())), false},
        {IRB.getInt8(isLittleEndian(I.getType()) ? 1 : 0), false}});
   registerSymbolicComputation(extract, &I);
@@ -814,7 +828,7 @@ void Symbolizer::visitUnreachableInst(UnreachableInst & /*unused*/) {
 void Symbolizer::visitInstruction(Instruction &I) {
   // Some instructions are only used in the context of exception handling, which
   // we ignore for now.
-  if (isa<LandingPadInst>(I) || isa<ResumeInst>(I) || isa<InsertValueInst>(I))
+  if (isa<LandingPadInst>(I) || isa<ResumeInst>(I))
     return;
 
   errs() << "Warning: unknown instruction " << I
@@ -883,7 +897,25 @@ CallInst *Symbolizer::createValueExpression(Value *V, IRBuilder<> &IRB) {
         {IRB.CreatePtrToInt(memory, intPtrType),
          ConstantInt::get(intPtrType,
                           dataLayout.getTypeStoreSize(V->getType())),
-         IRB.getInt8(0)});
+         IRB.getInt8(isLittleEndian(V->getType()) ? 1 : 0),
+         IRB.getInt8(1)});
+  }
+
+  if (auto vecType = dyn_cast<FixedVectorType>(valueType)) {
+    std::vector<CallInst *> elements;
+    for (unsigned int pos = 0; pos < vecType->getNumElements(); pos++) {
+      auto extracted = IRB.CreateExtractElement(V, pos);
+      elements.push_back(createValueExpression(extracted, IRB));
+    }
+    auto merged = elements[0];
+    for (unsigned i = 1; i < elements.size(); i++) {
+      if (isLittleEndian(valueType)) {
+        merged = IRB.CreateCall(runtime.buildConcat, {elements[i], merged});
+      } else {
+        merged = IRB.CreateCall(runtime.buildConcat, {merged, elements[i]});
+      }
+    }
+    return merged;
   }
 
   llvm_unreachable("Unhandled type for constant expression");
@@ -891,21 +923,110 @@ CallInst *Symbolizer::createValueExpression(Value *V, IRBuilder<> &IRB) {
 
 Symbolizer::SymbolicComputation
 Symbolizer::forceBuildRuntimeCall(IRBuilder<> &IRB, SymFnT function,
-                                  ArrayRef<std::pair<Value *, bool>> args) {
-  std::vector<Value *> functionArgs;
-  for (const auto &[arg, symbolic] : args) {
-    functionArgs.push_back(symbolic ? getSymbolicExpressionOrNull(arg) : arg);
+                                  ArrayRef<std::pair<Value *, bool>> args,
+                                  bool splitVectorArgs) {
+  unsigned int vectorSize = 0;
+  if (splitVectorArgs) {
+    for (const auto&[arg, symbolic]: args) {
+      auto argType = arg->getType();
+      if (argType->isVectorTy()) {
+        auto argVecSize = dyn_cast<FixedVectorType>(argType)->getNumElements();
+        if (vectorSize == 0) {
+          vectorSize = argVecSize;
+        } else {
+          assert(vectorSize == argVecSize && "vector arguments have different lengths!");
+        }
+      }
+    }
   }
-  auto *call = IRB.CreateCall(function, functionArgs);
 
+  // only split if we need to
+  splitVectorArgs = splitVectorArgs && vectorSize != 0;
+
+  std::vector<Instruction *> instructions;
   std::vector<Input> inputs;
-  for (unsigned i = 0; i < args.size(); i++) {
-    const auto &[arg, symbolic] = args[i];
-    if (symbolic)
-      inputs.push_back({arg, i, call});
-  }
+  if (!splitVectorArgs) {
+    std::vector<Value *> functionArgs;
+    for (const auto &[arg, symbolic]: args) {
+      functionArgs.push_back(symbolic ? getSymbolicExpressionOrNull(arg) : arg);
+    }
 
-  return SymbolicComputation(call, call, inputs);
+    auto *call = IRB.CreateCall(function, functionArgs);
+    instructions.push_back(call);
+
+    for (unsigned i = 0; i < args.size(); i++) {
+      const auto &[arg, symbolic] = args[i];
+      if (symbolic)
+        inputs.push_back({arg, i, call});
+    }
+  } else {
+    std::vector<Value *> outputs;
+    for (unsigned int pos = 0; pos < vectorSize; pos++) {
+      std::vector<Value *> functionArgs;
+      for (const auto &[arg, symbolic]: args) {
+        auto argType = arg->getType();
+        auto argExp = symbolic ? getSymbolicExpressionOrNull(arg) : arg;
+        if (argType->isVectorTy()) {
+          auto elemType = dyn_cast<FixedVectorType>(argType)->getElementType();
+          Value *extracted = nullptr;
+          if (symbolic) {
+            assert(argExp);
+            auto offset =
+                (isLittleEndian(argType) ? vectorSize - (pos + 1) : pos) * dataLayout.getTypeAllocSize(elemType);
+
+            auto length = dataLayout.getTypeStoreSize(elemType);
+            extracted = IRB.CreateCall(runtime.buildExtract,
+                                       {argExp,      // expression
+                                        IRB.getInt64(offset), // offset
+                                        IRB.getInt64(length),    // length
+                                        IRB.getInt8(0)});  // endianness
+            inputs.push_back({arg, 0, dyn_cast<Instruction>(extracted)});
+            if (elemType->getPrimitiveSizeInBits() == 1) {
+              instructions.push_back(dyn_cast<Instruction>(extracted));
+              extracted = IRB.CreateCall(runtime.buildBitsToBool, {extracted});
+            }
+          } else {
+            extracted = IRB.CreateExtractElement(argExp, pos);
+          }
+          if (auto extractedIns = dyn_cast<Instruction>(extracted)) {
+            instructions.push_back(extractedIns);
+          }
+          functionArgs.push_back(extracted);
+        } else {
+          functionArgs.push_back(argExp);
+        }
+      }
+      auto *call = IRB.CreateCall(function, functionArgs);
+      for (unsigned i = 0; i < args.size(); i++) {
+        const auto &[arg, symbolic] = args[i];
+        auto argType = arg->getType();
+        if (symbolic && !argType->isVectorTy())
+          inputs.push_back({arg, i, call});
+      }
+      instructions.push_back(call);
+      if (!function.getFunctionType()->getReturnType()->isVoidTy()) {
+        auto *converted = IRB.CreateCall(runtime.ensureBits, {call});
+        instructions.push_back(converted);
+        outputs.push_back(converted);
+      }
+    }
+    if (!function.getFunctionType()->getReturnType()->isVoidTy()) {
+      assert(outputs.size() == vectorSize && "Got unexpected number of outputs");
+      auto merged = outputs[0];
+      auto retIsLittleEndian = isLittleEndian(function.getFunctionType()->getReturnType());
+      for (unsigned i = 1; i < outputs.size(); i++) {
+        CallInst *mergeCall = nullptr;
+        if (retIsLittleEndian) {
+          mergeCall = IRB.CreateCall(runtime.buildConcat, {outputs[i], merged});
+        } else {
+          mergeCall = IRB.CreateCall(runtime.buildConcat, {merged, outputs[i]});
+        }
+        instructions.push_back(mergeCall);
+        merged = mergeCall;
+      }
+    }
+  }
+  return {instructions.front(), instructions.back(), inputs};
 }
 
 void Symbolizer::tryAlternative(IRBuilder<> &IRB, Value *V) {
@@ -921,4 +1042,27 @@ void Symbolizer::tryAlternative(IRBuilder<> &IRB, Value *V) {
     registerSymbolicComputation(SymbolicComputation(
         concreteDestExpr, pushAssertion, {{V, 0, destAssertion}}));
   }
+}
+
+uint64_t Symbolizer::aggregateMemberOffset(Type *aggregateType,
+                                           ArrayRef<unsigned> indices) const {
+  uint64_t offset = 0;
+  auto *indexedType = aggregateType;
+  for (auto index : indices) {
+    // All indices in an extractvalue instruction are constant:
+    // https://llvm.org/docs/LangRef.html#extractvalue-instruction
+
+    if (auto *structType = dyn_cast<StructType>(indexedType)) {
+      offset += dataLayout.getStructLayout(structType)->getElementOffset(index);
+      indexedType = structType->getElementType(index);
+    } else {
+      auto *arrayType = cast<ArrayType>(indexedType);
+      unsigned elementSize =
+          dataLayout.getTypeAllocSize(arrayType->getArrayElementType());
+      offset += elementSize * index;
+      indexedType = arrayType->getArrayElementType();
+    }
+  }
+
+  return offset;
 }

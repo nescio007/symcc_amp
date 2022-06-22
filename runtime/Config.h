@@ -24,8 +24,8 @@ struct Config {
   /// The directory for storing new outputs.
   std::string outputDir = "/tmp/output";
 
-  /// The input file, if any.
-  std::string inputFile;
+  /// The input port where symbolic input is read from
+  std::uint16_t inputPort;
 
   /// The file to log constraint solving information to.
   std::string logFile = "";

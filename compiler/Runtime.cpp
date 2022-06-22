@@ -26,10 +26,22 @@ template <typename... ArgsTy>
 SymFnT import(llvm::Module &M, llvm::StringRef name, llvm::Type *ret,
               ArgsTy... args) {
 #if LLVM_VERSION_MAJOR >= 9 && LLVM_VERSION_MAJOR < 11
-  return M.getOrInsertFunction(name, ret, args...).getCallee();
+  SymFnT result = M.getOrInsertFunction(name, ret, args...).getCallee();
+  if(auto func = dyn_cast<Function>(result)){
 #else
-  return M.getOrInsertFunction(name, ret, args...);
+  SymFnT result = M.getOrInsertFunction(name, ret, args...);
+  if (auto func = dyn_cast<Function>(result.getCallee())) {
 #endif
+    auto funcType = func->getFunctionType();
+    IRBuilder<> IRB(M.getContext());
+    auto *int1T = IRB.getInt1Ty();
+    for (unsigned int i = 0; i < funcType->getNumParams(); i++) {
+      if (funcType->getParamType(i) == int1T) {
+        func->addParamAttr(i, llvm::Attribute::ZExt);
+      }
+    }
+  }
+  return result;
 }
 
 } // namespace
@@ -70,6 +82,7 @@ Runtime::Runtime(Module &M) {
   buildBoolOr = import(M, "_sym_build_bool_or", ptrT, ptrT, ptrT);
   buildBoolXor = import(M, "_sym_build_bool_xor", ptrT, ptrT, ptrT);
   buildBoolToBits = import(M, "_sym_build_bool_to_bits", ptrT, ptrT, int8T);
+  buildBitsToBool = import(M, "_sym_build_bits_to_bool", ptrT, ptrT);
   pushPathConstraint = import(M, "_sym_push_path_constraint", voidT, ptrT,
                               IRB.getInt1Ty(), intPtrType);
 
@@ -79,6 +92,7 @@ Runtime::Runtime(Module &M) {
       import(M, "_sym_get_parameter_expression", ptrT, int8T);
   setReturnExpression = import(M, "_sym_set_return_expression", voidT, ptrT);
   getReturnExpression = import(M, "_sym_get_return_expression", ptrT);
+  ensureBits = import(M, "_sym_ensure_bits", ptrT, ptrT);
 
 #define LOAD_BINARY_OPERATOR_HANDLER(constant, name)                           \
   binaryOperatorHandlers[Instruction::constant] =                              \
@@ -144,11 +158,14 @@ Runtime::Runtime(Module &M) {
   memset = import(M, "_sym_memset", voidT, ptrT, ptrT, intPtrType);
   memmove = import(M, "_sym_memmove", voidT, ptrT, ptrT, intPtrType);
   readMemory =
-      import(M, "_sym_read_memory", ptrT, intPtrType, intPtrType, int8T);
+      import(M, "_sym_read_memory", ptrT, intPtrType, intPtrType, int8T, int8T);
   writeMemory = import(M, "_sym_write_memory", voidT, intPtrType, intPtrType,
                        ptrT, int8T);
+  buildInsert =
+      import(M, "_sym_build_insert", ptrT, ptrT, ptrT, IRB.getInt64Ty(), int8T);
   buildExtract = import(M, "_sym_build_extract", ptrT, ptrT, IRB.getInt64Ty(),
                         IRB.getInt64Ty(), int8T);
+  buildConcat = import(M, "_sym_build_concat", ptrT, ptrT, ptrT);
 
   notifyCall = import(M, "_sym_notify_call", voidT, intPtrType);
   notifyRet = import(M, "_sym_notify_ret", voidT, intPtrType);
@@ -158,10 +175,13 @@ Runtime::Runtime(Module &M) {
 /// Decide whether a function is called symbolically.
 bool isInterceptedFunction(const Function &f) {
   static const StringSet<> kInterceptedFunctions = {
-      "malloc",   "calloc",  "mmap",    "mmap64", "open",   "read",    "lseek",
-      "lseek64",  "fopen",   "fopen64", "fread",  "fseek",  "fseeko",  "rewind",
+      "malloc",   "calloc",  "mmap",    "mmap64", "read",    "lseek",
+      "lseek64",  "fseek",  "fseeko",  "rewind",
       "fseeko64", "getc",    "ungetc",  "memcpy", "memset", "strncpy", "strchr",
-      "memcmp",   "memmove", "ntohl",   "fgets",  "fgetc"};
+      "memcmp",   "memmove", "ntohl",   "fgets",  "fgetc", "getchar",
+      "send",   "sendto",   "sendmsg", "sendmmsg",
+      "recv",   "recvfrom", "recvmsg", "recvmmsg",
+      "select", "pselect",  "poll",    "ppoll",   "epoll_wait", "epoll_pwait"};
 
   return (kInterceptedFunctions.count(f.getName()) > 0);
 }
